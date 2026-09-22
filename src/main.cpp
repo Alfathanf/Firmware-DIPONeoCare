@@ -2,6 +2,7 @@
 
 #include "camera/camera_manager.h"
 #include "config.h"
+#include "frame/frame_uploader.h"
 #include "network/device_registration.h"
 #include "network/heartbeat.h"
 #include "secrets.h"
@@ -55,6 +56,7 @@ void setup() {
     wifiManagerInit(WIFI_SSID, WIFI_PASSWORD);
     deviceRegistrationInit();
     heartbeatInit();
+    frameUploaderInit();
     if (wifiManagerIsConnected()) {
         streamServerStart(config::kStreamPort);
         printStreamUrl();
@@ -68,6 +70,7 @@ void loop() {
     if (wifiManagerIsConnected()) {
         deviceRegistrationUpdate();
         heartbeatUpdate();
+        frameUploaderUpdate();
         if (!streamServerIsRunning()) {
             streamServerStart(config::kStreamPort);
             printStreamUrl();
