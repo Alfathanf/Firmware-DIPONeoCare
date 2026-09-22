@@ -2,9 +2,12 @@
 
 #include "camera/camera_manager.h"
 #include "config.h"
+#include "network/device_registration.h"
+#include "network/heartbeat.h"
 #include "secrets.h"
 #include "streaming/stream_server.h"
 #include "wifi/wifi_manager.h"
+#include "wifi/wifi_provisioning.h"
 
 namespace {
 void printStartupBanner() {
@@ -50,12 +53,30 @@ void setup() {
     }
 
     wifiManagerInit(WIFI_SSID, WIFI_PASSWORD);
-    streamServerStart(config::kStreamPort);
-    printStreamUrl();
+    deviceRegistrationInit();
+    heartbeatInit();
+    if (wifiManagerIsConnected()) {
+        streamServerStart(config::kStreamPort);
+        printStreamUrl();
+    } else if (wifiManagerIsProvisioning()) {
+        Serial.println("[BOOT] Waiting for Wi-Fi configuration");
+    }
 }
 
 void loop() {
     wifiManagerUpdate();
+    if (wifiManagerIsConnected()) {
+        deviceRegistrationUpdate();
+        heartbeatUpdate();
+        if (!streamServerIsRunning()) {
+            streamServerStart(config::kStreamPort);
+            printStreamUrl();
+        }
+    } else if (!wifiManagerIsProvisioning()) {
+        if (streamServerIsRunning()) {
+            streamServerStop();
+        }
+    }
 
     static uint32_t lastUrlPrintMs = 0;
     const uint32_t now = millis();

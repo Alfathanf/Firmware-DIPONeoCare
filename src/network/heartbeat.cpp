@@ -36,6 +36,10 @@ bool sendHeartbeatRequest() {
         return true;
     }
 
+    if (httpCode == 401 || httpCode == 403) {
+        deviceRegistrationHandleAuthFailure(httpCode);
+    }
+
     Serial.printf("[HEARTBEAT] Failed: HTTP %d\n", httpCode);
     return false;
 }

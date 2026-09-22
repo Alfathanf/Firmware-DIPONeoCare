@@ -18,17 +18,22 @@ bool httpPostJson(
 
     HTTPClient http;
     http.setTimeout(5000);
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
+    bool requestStarted = http.begin(url);
+    if (requestStarted) {
+        http.addHeader("Content-Type", "application/json");
 
-    if (token.length() > 0) {
-        http.addHeader("x-device-token", token);
+        if (token.length() > 0) {
+            http.addHeader("x-device-token", token);
+        }
+
+        httpCode = http.POST(payload);
+        responseBody = http.getString();
+    } else {
+        httpCode = -1;
+        responseBody = String();
     }
 
-    httpCode = http.POST(payload);
-    responseBody = http.getString();
-
-    bool success = (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED);
+    bool success = httpCode >= 200 && httpCode <= 299;
     if (!success) {
         Serial.printf("[HTTP] Request failed: HTTP %d\n", httpCode);
     }

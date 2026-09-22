@@ -8,7 +8,7 @@
 #include "wifi/wifi_manager.h"
 
 namespace {
-constexpr char kPreferencesNamespace[] = "diponeocare";
+constexpr char kPreferencesNamespace[] = "device";
 constexpr char kDeviceTokenKey[] = "deviceToken";
 constexpr char kDeviceIdKey[] = "deviceId";
 constexpr char kTokenMissing[] = "";
@@ -32,24 +32,26 @@ String readTokenFromNvs() {
     return token;
 }
 
-void saveTokenToNvs(const String& token) {
-    if (!g_initialized || token.length() == 0) {
-        return;
+bool saveRegistrationToNvs(const String& deviceId, const String& token) {
+    if (!g_initialized || deviceId.length() == 0 || token.length() == 0) {
+        return false;
     }
 
-    g_preferences.begin(kPreferencesNamespace, false);
-    g_preferences.putString(kDeviceTokenKey, token);
-    g_preferences.end();
-}
-
-void saveDeviceIdToNvs(const String& deviceId) {
-    if (!g_initialized || deviceId.length() == 0) {
-        return;
+    if (!g_preferences.begin(kPreferencesNamespace, false)) {
+        Serial.println("[DEVICE] Failed to open device storage");
+        return false;
     }
 
-    g_preferences.begin(kPreferencesNamespace, false);
-    g_preferences.putString(kDeviceIdKey, deviceId);
+    size_t deviceIdBytes = g_preferences.putString(kDeviceIdKey, deviceId);
+    size_t tokenBytes = g_preferences.putString(kDeviceTokenKey, token);
     g_preferences.end();
+
+    if (deviceIdBytes == 0 || tokenBytes == 0) {
+        Serial.println("[DEVICE] Failed to save device registration");
+        return false;
+    }
+
+    return true;
 }
 
 String loadDeviceIdFromNvs() {
@@ -80,13 +82,15 @@ bool parseRegistrationResponse(const String& body, String& outDeviceId, String& 
         return false;
     }
 
-    if (!doc["data"]["deviceId"].is<const char*>() || !doc["data"]["deviceToken"].is<const char*>()) {
+    const char* deviceId = doc["data"]["deviceId"] | "";
+    const char* deviceToken = doc["data"]["deviceToken"] | "";
+    if (deviceId == nullptr || deviceToken == nullptr) {
         Serial.println("[DEVICE] Registration response is missing deviceId or deviceToken");
         return false;
     }
 
-    outDeviceId = String(doc["data"]["deviceId"].as<const char*>());
-    outDeviceToken = String(doc["data"]["deviceToken"].as<const char*>());
+    outDeviceId = String(deviceId);
+    outDeviceToken = String(deviceToken);
     outPaired = doc["data"]["paired"].as<bool>();
 
     return outDeviceId.length() > 0 && outDeviceToken.length() > 0;
@@ -118,7 +122,7 @@ void attemptRegistration() {
     String responseBody;
     int httpCode = 0;
     bool requestOk = httpPostJson(url, payload, "", responseBody, httpCode);
-    if (!requestOk || httpCode != 200) {
+    if (!requestOk) {
         Serial.printf("[DEVICE] Registration failed: HTTP %d\n", httpCode);
         return;
     }
@@ -131,13 +135,16 @@ void attemptRegistration() {
         return;
     }
 
-    saveTokenToNvs(deviceToken);
-    saveDeviceIdToNvs(deviceId);
+    if (!saveRegistrationToNvs(deviceId, deviceToken)) {
+        Serial.println("[DEVICE] Registration succeeded, but device data was not saved");
+        return;
+    }
+
     g_deviceToken = deviceToken;
     g_deviceId = deviceId;
     g_registered = true;
 
-    Serial.println("[DEVICE] Registration successful");
+    Serial.printf("[DEVICE] Registration successful: HTTP %d\n", httpCode);
     Serial.printf("[DEVICE] Device ID: %s\n", deviceId.c_str());
     Serial.println("[DEVICE] Device token saved");
     Serial.printf("[DEVICE] Paired: %s\n", paired ? "true" : "false");
@@ -152,7 +159,8 @@ void deviceRegistrationInit() {
     g_registered = isTokenValid(g_deviceToken);
 
     if (g_registered) {
-        Serial.println("[DEVICE] Device token loaded from flash");
+        Serial.println("[DEVICE] Stored device token found");
+        Serial.println("[DEVICE] Device already registered");
         Serial.printf("[DEVICE] Device ID: %s\n", g_deviceId.length() > 0 ? g_deviceId.c_str() : "unknown");
     } else {
         Serial.println("[DEVICE] No stored device token");
@@ -191,4 +199,26 @@ String deviceRegistrationGetDeviceId() {
         g_deviceId = loadDeviceIdFromNvs();
     }
     return g_deviceId;
+}
+
+void deviceRegistrationHandleAuthFailure(int httpCode) {
+    if (httpCode != 401 && httpCode != 403) {
+        return;
+    }
+
+    if (!g_initialized) {
+        return;
+    }
+
+    if (g_preferences.begin(kPreferencesNamespace, false)) {
+        g_preferences.remove(kDeviceTokenKey);
+        g_preferences.remove(kDeviceIdKey);
+        g_preferences.end();
+    }
+
+    g_deviceToken = String();
+    g_deviceId = String();
+    g_registered = false;
+    g_lastRegistrationAttemptMs = 0;
+    Serial.printf("[DEVICE] Stored device token rejected: HTTP %d; registration required\n", httpCode);
 }
