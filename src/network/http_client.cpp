@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 
 #include "config.h"
+#include "network/device_status.h"
 
 bool httpPostJson(
     const String& url,
@@ -34,6 +35,9 @@ bool httpPostJson(
     }
 
     bool success = httpCode >= 200 && httpCode <= 299;
+    if (success) {
+        deviceStatusRecordBackendSuccess();
+    }
     if (!success) {
         Serial.printf("[HTTP] Request failed: HTTP %d\n", httpCode);
     }

@@ -13,7 +13,7 @@
 #include "config.h"
 #include "frame/frame_uploader.h"
 #include "network/device_registration.h"
-#include "network/http_client.h"
+#include "network/device_status.h"
 #include "wifi/wifi_manager.h"
 
 namespace {
@@ -212,6 +212,8 @@ int16_t convertSample(uint16_t rawSample, int32_t dcOffset) {
     return static_cast<int16_t>(centered);
 }
 
+String createAudioWindowId(const String& macAddress, const struct timeval& recordingStart);
+
 void IRAM_ATTR sampleTimerCallback() {
     if (!g_recording || g_sampleIndex >= kSampleCount) {
         return;
@@ -250,8 +252,34 @@ bool configureAdc() {
     return true;
 }
 
-bool recordWav(struct timeval& recordingStart) {
+bool recordWav(
+    struct timeval& recordingStart,
+    String& startedAt,
+    String& audioWindowId,
+    String& endedAt) {
     gettimeofday(&recordingStart, nullptr);
+    if (!formatTimestamp(recordingStart, startedAt)) {
+        Serial.println("[AUDIO] ERROR: Recording timestamp unavailable; audio discarded");
+        return false;
+    }
+
+    audioWindowId = createAudioWindowId(wifiManagerGetMacAddress(), recordingStart);
+    if (audioWindowId.length() == 0) {
+        Serial.println("[AUDIO] ERROR: Audio window ID generation failed; audio discarded");
+        return false;
+    }
+
+    struct timeval recordingEnd = recordingStart;
+    recordingEnd.tv_sec += kRecordingSeconds;
+    if (!formatTimestamp(recordingEnd, endedAt)) {
+        Serial.println("[AUDIO] ERROR: Recording end timestamp unavailable");
+        return false;
+    }
+
+    Serial.printf("[AUDIO] Window ID: %s\n", audioWindowId.c_str());
+    Serial.printf("[AUDIO] Window start: %s\n", startedAt.c_str());
+    Serial.printf("[AUDIO] Window end:   %s\n", endedAt.c_str());
+
     g_sampleIndex = 0;
     g_sampleComplete = false;
     g_recording = true;
@@ -332,8 +360,8 @@ bool uploadWav(
     const String& startedAt,
     const String* captureIds,
     size_t captureCount) {
-    if (!wifiManagerIsConnected() || !deviceRegistrationIsRegistered()) {
-        Serial.println("[AUDIO] Upload skipped: network or device registration unavailable");
+    if (!deviceIsOnline()) {
+        Serial.println("[AUDIO] Upload skipped: device is not online");
         return false;
     }
 
@@ -374,11 +402,10 @@ bool uploadWav(
     MultipartAudioStream body(header, g_wavBuffer, kWavBytes, footer);
 
     HTTPClient http;
-    WiFiClient* plainClient = nullptr;
-    WiFiClientSecure* secureClient = nullptr;
+    http.setTimeout(5000);
     int httpCode = -1;
     String responseBody;
-    const bool requestStarted = httpBeginRequest(http, url, &plainClient, &secureClient);
+    const bool requestStarted = http.begin(url);
     if (requestStarted) {
         http.addHeader("Content-Type", contentType);
         http.addHeader("Content-Length", String(body.length()));
@@ -395,6 +422,7 @@ bool uploadWav(
     const bool success = httpCode >= 200 && httpCode < 300;
     if (success) {
         Serial.printf("[AUDIO] Upload successful: HTTP %d\n", httpCode);
+        deviceStatusRecordBackendSuccess();
     } else {
         Serial.printf("[AUDIO] ERROR: Audio upload failed: HTTP %d\n", httpCode);
         if (responseBody.length() > 0) {
@@ -402,21 +430,39 @@ bool uploadWav(
         }
     }
 
-    httpFinishRequest(http, plainClient, secureClient);
+    http.end();
     return success;
 }
 
 void audioTask(void*) {
+    bool waitingMessagePrinted = false;
     while (true) {
         if (g_wavBuffer == nullptr) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
+        if (!deviceIsOnline()) {
+            if (!waitingMessagePrinted) {
+                Serial.println("[AUDIO] Waiting for device online state...");
+                waitingMessagePrinted = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        waitingMessagePrinted = false;
+
         g_recording = true;
-        Serial.println("[AUDIO] Starting audio window...");
+        Serial.println("[AUDIO] Starting audio window");
         struct timeval recordingStart;
-        const bool recorded = recordWav(recordingStart);
+        String startedAt;
+        String audioWindowId;
+        String endedAt;
+        const bool recorded = recordWav(
+            recordingStart,
+            startedAt,
+            audioWindowId,
+            endedAt);
         g_recording = false;
 
         if (!recorded) {
@@ -425,55 +471,61 @@ void audioTask(void*) {
             continue;
         }
 
-        String startedAt;
-        if (!formatTimestamp(recordingStart, startedAt)) {
-            Serial.println("[AUDIO] ERROR: Recording timestamp unavailable; audio discarded");
+        if (!deviceIsOnline()) {
+            Serial.println("[AUDIO] Device went offline during recording; audio discarded");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        const String macAddress = wifiManagerGetMacAddress();
-        const String audioWindowId = createAudioWindowId(macAddress, recordingStart);
-        if (audioWindowId.length() == 0) {
-            Serial.println("[AUDIO] ERROR: Audio window ID generation failed; audio discarded");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        struct timeval recordingEnd = recordingStart;
-        recordingEnd.tv_sec += 5;
-        String endedAt;
-        if (!formatTimestamp(recordingEnd, endedAt)) {
-            Serial.println("[AUDIO] ERROR: Recording end timestamp unavailable");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        Serial.printf("[AUDIO] audioWindowId: %s\n", audioWindowId.c_str());
-        Serial.printf("[AUDIO] startedAt: %s\n", startedAt.c_str());
         Serial.printf("[AUDIO] Recording timestamp: %s\n", startedAt.c_str());
         Serial.printf("[AUDIO] Samples recorded: %u\n", static_cast<unsigned>(kSampleCount));
         Serial.printf("[AUDIO] PCM size: %u bytes\n", static_cast<unsigned>(kPcmBytes));
         Serial.printf("[AUDIO] WAV size: %u bytes\n", static_cast<unsigned>(kWavBytes));
+        Serial.println("[AUDIO] Audio recording complete");
 
         String captureIds[5];
+        String captureTimestamps[5];
         size_t captureCount = 0;
-        if (!frameUploaderGetCaptureIdsForWindow(startedAt, endedAt, captureIds, 5, &captureCount) || captureCount != 5) {
-            Serial.printf("[AUDIO] ERROR: Only %u valid capture IDs available\n", static_cast<unsigned>(captureCount));
-            Serial.println("[AUDIO] Required: 5");
-            Serial.println("[AUDIO] Audio upload postponed/skipped");
+        size_t reportedCaptureCount = 0;
+        const uint32_t confirmationStartMs = millis();
+        Serial.println("[AUDIO] Waiting for frame confirmations...");
+        while (captureCount < 5 &&
+               millis() - confirmationStartMs < config::kAudioFrameConfirmationWaitMs) {
+            frameUploaderGetCaptureIdsForWindow(
+                startedAt,
+                endedAt,
+                captureIds,
+                captureTimestamps,
+                5,
+                &captureCount);
+
+            while (reportedCaptureCount < captureCount) {
+                Serial.println("[AUDIO] Frame confirmation received");
+                Serial.printf("[AUDIO] Capture ID: %s\n",
+                    captureIds[reportedCaptureCount].c_str());
+                Serial.printf("[AUDIO] Frame timestamp: %s\n",
+                    captureTimestamps[reportedCaptureCount].c_str());
+                Serial.println("[AUDIO] Belongs to current window: YES");
+                ++reportedCaptureCount;
+                Serial.printf("[AUDIO] Valid capture IDs: %u/5\n",
+                    static_cast<unsigned>(reportedCaptureCount));
+            }
+
+            if (captureCount < 5) {
+                vTaskDelay(pdMS_TO_TICKS(config::kAudioFrameConfirmationPollMs));
+            }
+        }
+
+        if (captureCount != 5) {
+            Serial.println("[AUDIO] Frame confirmation timeout");
+            Serial.printf("[AUDIO] Valid capture IDs: %u/5\n", static_cast<unsigned>(captureCount));
+            Serial.println("[AUDIO] Audio upload skipped");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        for (size_t index = 0; index < captureCount; ++index) {
-            Serial.printf("[AUDIO] Captured frame ID for audio window:\n");
-            Serial.printf("[AUDIO]   %s\n", captureIds[index].c_str());
-        }
-
-        Serial.println("[AUDIO] Audio recording complete");
         Serial.println("[AUDIO] Duration: 5 seconds");
-        Serial.printf("[AUDIO] Capture IDs: %u\n", static_cast<unsigned>(captureCount));
+        Serial.printf("[AUDIO] Valid capture IDs: %u/5\n", static_cast<unsigned>(captureCount));
         Serial.println("[AUDIO] Uploading audio...");
         Serial.printf("[AUDIO] Upload URL: %s\n", (String(config::kBackendBaseUrl) + String(config::kAudioUploadPath)).c_str());
 

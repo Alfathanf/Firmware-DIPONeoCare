@@ -1,5 +1,8 @@
 #include "camera/camera_manager.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 // ESP32-S3 WROOM N16R8 camera pin mapping that has already been verified.
 #define PWDN_GPIO_NUM -1
 #define RESET_GPIO_NUM -1
@@ -25,9 +28,11 @@ namespace {
 constexpr uint8_t kJpegQuality = 12;
 constexpr framesize_t kFrameSize = FRAMESIZE_QVGA;
 constexpr uint32_t kXclkFrequencyHz = 20000000;
+constexpr uint32_t kCameraLockTimeoutMs = 2000;
 
 bool g_cameraReady = false;
 bool g_psramAvailable = false;
+SemaphoreHandle_t g_framebufferMutex = nullptr;
 
 void printCameraError(const char* context, esp_err_t err) {
     Serial.printf("[CAMERA] %s failed with error 0x%x (%s)\n", context, err, esp_err_to_name(err));
@@ -91,6 +96,14 @@ bool cameraInit() {
     configureCameraPins(config);
     configureCameraFrameBuffer(config);
 
+    if (g_framebufferMutex == nullptr) {
+        g_framebufferMutex = xSemaphoreCreateMutex();
+    }
+    if (g_framebufferMutex == nullptr) {
+        Serial.println("[CAMERA] Failed to create framebuffer mutex");
+        return false;
+    }
+
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
         printCameraError("esp_camera_init", err);
@@ -116,13 +129,19 @@ bool cameraInit() {
 }
 
 camera_fb_t* cameraCapture() {
-    if (!g_cameraReady) {
+    if (!g_cameraReady || g_framebufferMutex == nullptr) {
+        return nullptr;
+    }
+
+    if (xSemaphoreTake(g_framebufferMutex, pdMS_TO_TICKS(kCameraLockTimeoutMs)) != pdTRUE) {
+        Serial.println("[CAMERA] Timed out waiting for framebuffer ownership");
         return nullptr;
     }
 
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb == nullptr) {
         Serial.println("[CAMERA] Failed to capture a frame");
+        xSemaphoreGive(g_framebufferMutex);
         return nullptr;
     }
 
@@ -132,6 +151,7 @@ camera_fb_t* cameraCapture() {
 void cameraRelease(camera_fb_t* fb) {
     if (fb != nullptr) {
         esp_camera_fb_return(fb);
+        xSemaphoreGive(g_framebufferMutex);
     }
 }
 

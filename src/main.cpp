@@ -1,11 +1,13 @@
 #include <Arduino.h>
 
+#include "audio/audio_manager.h"
 #include "camera/camera_manager.h"
 #include "config.h"
 #include "frame/frame_uploader.h"
 #include "network/device_registration.h"
 #include "network/heartbeat.h"
 #include "secrets.h"
+#include "streaming/live_stream_publisher.h"
 #include "streaming/stream_server.h"
 #include "wifi/wifi_manager.h"
 #include "wifi/wifi_provisioning.h"
@@ -57,6 +59,8 @@ void setup() {
     deviceRegistrationInit();
     heartbeatInit();
     frameUploaderInit();
+    liveStreamPublisher::begin();
+    audioManager::begin();
     if (wifiManagerIsConnected()) {
         streamServerStart(config::kStreamPort);
         printStreamUrl();
@@ -71,6 +75,7 @@ void loop() {
         deviceRegistrationUpdate();
         heartbeatUpdate();
         frameUploaderUpdate();
+        audioManager::update();
         if (!streamServerIsRunning()) {
             streamServerStart(config::kStreamPort);
             printStreamUrl();
@@ -80,6 +85,8 @@ void loop() {
             streamServerStop();
         }
     }
+
+    liveStreamPublisher::update();
 
     static uint32_t lastUrlPrintMs = 0;
     const uint32_t now = millis();
