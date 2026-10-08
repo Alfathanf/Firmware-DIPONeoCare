@@ -28,7 +28,12 @@ bool httpPostJson(
         }
 
         httpCode = http.POST(payload);
-        responseBody = http.getString();
+        const bool shouldReadBody = httpCode != HTTP_CODE_ACCEPTED &&
+            httpCode != HTTP_CODE_NO_CONTENT &&
+            httpCode != HTTP_CODE_RESET_CONTENT;
+        if (shouldReadBody) {
+            responseBody = http.getString();
+        }
     } else {
         httpCode = -1;
         responseBody = String();

@@ -416,7 +416,12 @@ bool uploadWav(
         }
 
         httpCode = http.sendRequest("POST", &body, body.length());
-        responseBody = http.getString();
+        const bool shouldReadBody = httpCode != HTTP_CODE_ACCEPTED &&
+            httpCode != HTTP_CODE_NO_CONTENT &&
+            httpCode != HTTP_CODE_RESET_CONTENT;
+        if (shouldReadBody) {
+            responseBody = http.getString();
+        }
     }
 
     const bool success = httpCode >= 200 && httpCode < 300;

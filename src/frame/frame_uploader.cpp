@@ -263,12 +263,20 @@ bool uploadFrame(
 
     String responseBody;
     const uint32_t responseStartedAt = millis();
-    responseBody = http.getString();
+    const bool shouldReadBody = httpCode != HTTP_CODE_ACCEPTED &&
+        httpCode != HTTP_CODE_NO_CONTENT &&
+        httpCode != HTTP_CODE_RESET_CONTENT;
+    if (shouldReadBody) {
+        responseBody = http.getString();
+    }
     responseBodyMs = millis() - responseStartedAt;
     totalUploadMs = millis() - uploadStartedAt;
 
     Serial.printf("[FRAME] Upload duration: %lu ms\n", static_cast<unsigned long>(totalUploadMs));
     Serial.printf("[FRAME] Upload result: HTTP %d\n", httpCode);
+    if (!shouldReadBody) {
+        Serial.println("[FRAME] Response body intentionally not read for accepted/no-content status");
+    }
 
     bool success = httpCode >= 200 && httpCode <= 299;
     if (success) {
